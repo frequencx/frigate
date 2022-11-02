@@ -25,6 +25,7 @@ from frigate.object_processing import TrackedObjectProcessor
 from frigate.output import output_frames
 from frigate.plus import PlusApi
 from frigate.record import RecordingCleanup, RecordingMaintainer
+from frigate.restream import RestreamApi
 from frigate.stats import StatsEmitter, stats_init
 from frigate.storage import StorageMaintainer
 from frigate.version import VERSION
@@ -163,6 +164,10 @@ class FrigateApp:
             self.plus_api,
         )
 
+    def init_restream(self) -> None:
+        self.restream = RestreamApi(self.config)
+        self.restream.add_cameras()
+
     def init_mqtt(self) -> None:
         self.mqtt_client = create_mqtt_client(self.config, self.camera_metrics)
 
@@ -250,6 +255,10 @@ class FrigateApp:
     def start_camera_processors(self) -> None:
         model_shape = (self.config.model.height, self.config.model.width)
         for name, config in self.config.cameras.items():
+            if not self.config.cameras[name].enabled:
+                logger.info(f"Camera processor not started for disabled camera {name}")
+                continue
+
             camera_process = mp.Process(
                 target=track_camera,
                 name=f"camera_processor:{name}",
@@ -271,6 +280,10 @@ class FrigateApp:
 
     def start_camera_capture_processes(self) -> None:
         for name, config in self.config.cameras.items():
+            if not self.config.cameras[name].enabled:
+                logger.info(f"Capture process not started for disabled camera {name}")
+                continue
+
             capture_process = mp.Process(
                 target=capture_camera,
                 name=f"camera_capture:{name}",
@@ -363,6 +376,7 @@ class FrigateApp:
         self.start_camera_capture_processes()
         self.init_stats()
         self.init_web_server()
+        self.init_restream()
         self.start_mqtt_relay()
         self.start_event_processor()
         self.start_event_cleanup()

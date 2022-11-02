@@ -12,8 +12,18 @@ import yaml
 from pydantic import BaseModel, Extra, Field, validator
 from pydantic.fields import PrivateAttr
 
-from frigate.const import BASE_DIR, CACHE_DIR, YAML_EXT
-from frigate.util import create_mask, deep_merge, load_labels
+from frigate.const import (
+    BASE_DIR,
+    CACHE_DIR,
+    REGEX_CAMERA_NAME,
+    YAML_EXT,
+)
+from frigate.util import (
+    create_mask,
+    deep_merge,
+    escape_special_characters,
+    load_labels,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -403,6 +413,7 @@ class FfmpegConfig(FrigateBaseModel):
 
 class CameraRoleEnum(str, Enum):
     record = "record"
+    restream = "restream"
     rtmp = "rtmp"
     detect = "detect"
 
@@ -513,12 +524,22 @@ class CameraMqttConfig(FrigateBaseModel):
 
 
 class RtmpConfig(FrigateBaseModel):
-    enabled: bool = Field(default=True, title="RTMP restreaming enabled.")
+    enabled: bool = Field(default=False, title="RTMP restreaming enabled.")
 
 
-class CameraLiveConfig(FrigateBaseModel):
-    height: int = Field(default=720, title="Live camera view height")
-    quality: int = Field(default=8, ge=1, le=31, title="Live camera view quality")
+class JsmpegStreamConfig(FrigateBaseModel):
+    height: int = Field(default=720, title="Live camera view height.")
+    quality: int = Field(default=8, ge=1, le=31, title="Live camera view quality.")
+
+
+class RestreamConfig(FrigateBaseModel):
+    enabled: bool = Field(default=True, title="Restreaming enabled.")
+    force_audio: bool = Field(
+        default=False, title="Force audio compatibility with the browser."
+    )
+    jsmpeg: JsmpegStreamConfig = Field(
+        default_factory=JsmpegStreamConfig, title="Jsmpeg Stream Configuration."
+    )
 
 
 class CameraUiConfig(FrigateBaseModel):
@@ -529,7 +550,8 @@ class CameraUiConfig(FrigateBaseModel):
 
 
 class CameraConfig(FrigateBaseModel):
-    name: Optional[str] = Field(title="Camera name.", regex="^[a-zA-Z0-9_-]+$")
+    name: Optional[str] = Field(title="Camera name.", regex=REGEX_CAMERA_NAME)
+    enabled: bool = Field(default=True, title="Enable camera.")
     ffmpeg: CameraFfmpegConfig = Field(title="FFmpeg configuration for the camera.")
     best_image_timeout: int = Field(
         default=60,
@@ -544,8 +566,8 @@ class CameraConfig(FrigateBaseModel):
     rtmp: RtmpConfig = Field(
         default_factory=RtmpConfig, title="RTMP restreaming configuration."
     )
-    live: CameraLiveConfig = Field(
-        default_factory=CameraLiveConfig, title="Live playback settings."
+    restream: RestreamConfig = Field(
+        default_factory=RestreamConfig, title="Restreaming configuration."
     )
     snapshots: SnapshotsConfig = Field(
         default_factory=SnapshotsConfig, title="Snapshot configuration."
@@ -582,7 +604,16 @@ class CameraConfig(FrigateBaseModel):
 
         # add roles to the input if there is only one
         if len(config["ffmpeg"]["inputs"]) == 1:
-            config["ffmpeg"]["inputs"][0]["roles"] = ["record", "rtmp", "detect"]
+            has_rtmp = "rtmp" in config["ffmpeg"]["inputs"][0].get("roles", [])
+
+            config["ffmpeg"]["inputs"][0]["roles"] = [
+                "record",
+                "detect",
+                "restream",
+            ]
+
+            if has_rtmp:
+                config["ffmpeg"]["inputs"][0]["roles"].append("rtmp")
 
         super().__init__(**config)
 
@@ -674,7 +705,7 @@ class CameraConfig(FrigateBaseModel):
             + global_args
             + hwaccel_args
             + input_args
-            + ["-i", ffmpeg_input.path]
+            + ["-i", escape_special_characters(ffmpeg_input.path)]
             + ffmpeg_output_args
         )
 
@@ -763,11 +794,11 @@ class FrigateConfig(FrigateBaseModel):
     snapshots: SnapshotsConfig = Field(
         default_factory=SnapshotsConfig, title="Global snapshots configuration."
     )
-    live: CameraLiveConfig = Field(
-        default_factory=CameraLiveConfig, title="Global live configuration."
-    )
     rtmp: RtmpConfig = Field(
         default_factory=RtmpConfig, title="Global RTMP restreaming configuration."
+    )
+    restream: RestreamConfig = Field(
+        default_factory=RestreamConfig, title="Global restream configuration."
     )
     birdseye: BirdseyeConfig = Field(
         default_factory=BirdseyeConfig, title="Birdseye configuration."
@@ -799,14 +830,14 @@ class FrigateConfig(FrigateBaseModel):
         if config.mqtt.password:
             config.mqtt.password = config.mqtt.password.format(**FRIGATE_ENV_VARS)
 
-        # Global config to propegate down to camera level
+        # Global config to propagate down to camera level
         global_config = config.dict(
             include={
                 "birdseye": ...,
                 "record": ...,
                 "snapshots": ...,
-                "live": ...,
                 "rtmp": ...,
+                "restream": ...,
                 "objects": ...,
                 "motion": ...,
                 "detect": ...,
@@ -893,6 +924,11 @@ class FrigateConfig(FrigateBaseModel):
                     f"Camera {name} has rtmp enabled, but rtmp is not assigned to an input."
                 )
 
+            if camera_config.restream.enabled and not "restream" in assigned_roles:
+                raise ValueError(
+                    f"Camera {name} has restream enabled, but restream is not assigned to an input."
+                )
+
             # backwards compatibility for retain_days
             if not camera_config.record.retain_days is None:
                 logger.warning(
@@ -915,10 +951,9 @@ class FrigateConfig(FrigateBaseModel):
                 logger.warning(
                     f"{name}: Recording retention is configured for {camera_config.record.retain.mode} and event retention is configured for {camera_config.record.events.retain.mode}. The more restrictive retention policy will be applied."
                 )
-            # generage the ffmpeg commands
+            # generate the ffmpeg commands
             camera_config.create_ffmpeg_cmds()
             config.cameras[name] = camera_config
-
         return config
 
     @validator("cameras")
