@@ -128,7 +128,7 @@ WORKDIR /opt/frigate/
 ADD frigate frigate/
 ADD migrations migrations/
 
-COPY web/dist web/
+COPY web/ web/
 
 COPY docker/rootfs/ /
 
